@@ -153,9 +153,17 @@ class EvaluationService:
             # Step 4.6: Detect ground truth type (CSV or ZIP)
             ground_truth_type = self._detect_ground_truth_type(request.dataset_path)
 
+            numpy_path_mode = (
+                bool(request.evaluation_script_path)
+                and self._uses_numpy_tensor_format(request)
+                and submission_type != SubmissionType.ZIP
+                and ground_truth_type != SubmissionType.ZIP
+            )
+
             # Step 5: Process ground truth based on type
             ground_truth = None
             ground_truth_extraction_path = None
+            predictions_extraction_path = None
 
             if ground_truth_type == SubmissionType.ZIP:
                 # ZIP ground truth - validate requirements and extract
@@ -182,6 +190,24 @@ class EvaluationService:
                 )
                 # For ZIP ground truth, we don't parse to DataFrame
                 # The custom evaluator will receive the extraction path
+            elif numpy_path_mode:
+                ground_truth_bytes = (
+                    dataset_content
+                    if isinstance(dataset_content, bytes)
+                    else dataset_content.encode("latin-1")
+                )
+                ground_truth_extraction_path = self._materialize_numpy_tensor_dir(
+                    ground_truth_bytes,
+                    request.dataset_path,
+                    "ground_truth.npz",
+                )
+                logger.info(
+                    "Materialized NumPy ground truth for path-based custom evaluation",
+                    extra={
+                        "ground_truth_path": ground_truth_extraction_path,
+                        "request_id": request_id,
+                    },
+                )
             else:
                 # CSV ground truth - parse as usual
                 ground_truth = await self._parse_ground_truth(
@@ -268,7 +294,27 @@ class EvaluationService:
                 # NumPy formats: parse binary directly, skip text decode. Python
                 # pickle is intentionally unsupported because deserializing an
                 # uploaded pickle executes arbitrary constructors.
-                if request.prediction_format in ("npy", "npz"):
+                if numpy_path_mode:
+                    prediction_bytes = (
+                        predictions_data
+                        if isinstance(predictions_data, bytes)
+                        else predictions_data.encode("latin-1")
+                    )
+                    predictions_extraction_path = self._materialize_numpy_tensor_dir(
+                        prediction_bytes,
+                        request.predictions_path
+                        or f"predictions.{request.prediction_format}",
+                        f"predictions.{request.prediction_format}",
+                    )
+                    parsed_predictions = None
+                    logger.info(
+                        "Materialized NumPy predictions for path-based custom evaluation",
+                        extra={
+                            "predictions_path": predictions_extraction_path,
+                            "request_id": request_id,
+                        },
+                    )
+                elif request.prediction_format in ("npy", "npz"):
                     bin_data = (
                         predictions_data
                         if isinstance(predictions_data, bytes)
@@ -384,6 +430,7 @@ class EvaluationService:
                     custom_evaluator,
                     request_id,
                     correlation_id,
+                    predictions_extraction_path=predictions_extraction_path,
                 )
 
                 # Unpack result - could be (metrics, subtasks_metrics, stdout, stderr) or (JSONResponse, {}, stdout, stderr)
@@ -493,6 +540,23 @@ class EvaluationService:
                             "cleanup_time_ms": cleanup_time_ms,
                             "request_id": request_id,
                             "cleanup_stage": "failed",
+                        },
+                    )
+
+            if (
+                "predictions_extraction_path" in locals()
+                and predictions_extraction_path
+            ):
+                try:
+                    shutil.rmtree(predictions_extraction_path)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to cleanup predictions extraction directory",
+                        extra={
+                            "operation": "predictions_cleanup",
+                            "extraction_path": predictions_extraction_path,
+                            "error": str(cleanup_error),
+                            "request_id": request_id,
                         },
                     )
 
@@ -1549,6 +1613,21 @@ class EvaluationService:
         prediction_format = (request.prediction_format or "").lower()
         return prediction_format in ("npy", "npz") or dataset_ext in (".npy", ".npz")
 
+    @staticmethod
+    def _materialize_numpy_tensor_dir(
+        content: bytes, source_path: str, fallback_name: str
+    ) -> str:
+        """Write a NumPy payload to a temp directory for path-based evaluation."""
+        from urllib.parse import urlparse
+
+        parsed_path = urlparse(source_path).path
+        filename = os.path.basename(parsed_path) or fallback_name
+        temp_dir = tempfile.mkdtemp(prefix="numpy_tensor_")
+        file_path = os.path.join(temp_dir, filename)
+        with open(file_path, "wb") as output_file:
+            output_file.write(content)
+        return temp_dir
+
     def _detect_ground_truth_type(self, dataset_path: str) -> SubmissionType:
         """
         Detect if ground truth is CSV or ZIP based on file extension.
@@ -2160,6 +2239,7 @@ class EvaluationService:
         custom_evaluator,
         request_id,
         correlation_id,
+        predictions_extraction_path=None,
     ):
         """Perform the actual evaluation."""
         try:
@@ -2170,7 +2250,11 @@ class EvaluationService:
             with log_performance(
                 logger,
                 "evaluation_computation",
-                prediction_count=len(parsed_predictions),
+                prediction_count=(
+                    len(parsed_predictions)
+                    if parsed_predictions is not None
+                    else None
+                ),
                 ground_truth_count=(
                     len(ground_truth) if ground_truth is not None else None
                 ),
@@ -2183,6 +2267,7 @@ class EvaluationService:
                     try:
                         with output_logger:
                             result = custom_evaluator.execute_with_paths(
+                                extraction_path=predictions_extraction_path,
                                 predictions=parsed_predictions,
                                 ground_truth_path=ground_truth_extraction_path,
                                 ground_truth=ground_truth,

@@ -1,9 +1,11 @@
 """Service-path regressions for path ground truth and subtask routing."""
 
+import io
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
 from app.evaluator.engines.custom_evaluator import (
@@ -141,6 +143,75 @@ def compute_scores(predictions_df, ground_truth_path):
     ]
     provider.close.assert_awaited_once()
     assert not ground_truth_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_numpy_tensor_submission_uses_path_delivery_for_custom_evaluator():
+    """Large NumPy payloads must not be JSON-serialized into the worker."""
+    service = EvaluationService()
+    evaluator = CustomEvaluator()
+    evaluator.load_script(
+        """
+def compute_scores(predictions_df, ground_truth_df):
+    return 90.0, 0.9, 90.0, 0.9
+"""
+    )
+    evaluator.execute_with_paths = Mock(return_value={"main": _metrics(90.0)})
+
+    prediction_buffer = io.BytesIO()
+    np.savez(prediction_buffer, reconstruction=np.array([1, 2, 3], dtype=np.float32))
+    prediction_bytes = prediction_buffer.getvalue()
+
+    ground_truth_buffer = io.BytesIO()
+    np.savez(
+        ground_truth_buffer,
+        target=np.array([1, 2, 3], dtype=np.float32),
+        case_id=np.array([10, 20, 30], dtype=np.int64),
+    )
+    ground_truth_bytes = ground_truth_buffer.getvalue()
+
+    provider = Mock()
+    provider.close = AsyncMock()
+    service.initialize = AsyncMock()
+    service._create_and_authenticate_provider = AsyncMock(return_value=provider)
+    service._get_file_metadata = AsyncMock(
+        return_value=SimpleNamespace(
+            size=len(ground_truth_bytes),
+            etag="numpy-path-test",
+        )
+    )
+    service._fetch_dataset = AsyncMock(return_value=(ground_truth_bytes, False))
+    service._get_predictions_data = AsyncMock(return_value=prediction_bytes)
+    service._load_custom_evaluator = AsyncMock(return_value=evaluator)
+    service._parse_ground_truth = AsyncMock(
+        side_effect=AssertionError("NumPy ground truth must not be parsed as records")
+    )
+    service._parse_binary_predictions = Mock(
+        side_effect=AssertionError("NumPy predictions must not be parsed as records")
+    )
+
+    request = EvaluationRequest(
+        datasource_provider="remote_url",
+        dataset_path="https://example.test/ground-truth.npz",
+        predictions_path="https://example.test/predictions.npz",
+        prediction_format="npz",
+        evaluation_script_path="https://example.test/evaluator.py",
+    )
+
+    response = await service.evaluate(
+        request,
+        request_id="numpy-path-mode",
+        correlation_id="correlation",
+        start_time=time.time(),
+    )
+
+    assert isinstance(response, EvaluationResponse)
+    call = evaluator.execute_with_paths.call_args
+    assert call.kwargs["predictions"] is None
+    assert call.kwargs["ground_truth"] is None
+    assert call.kwargs["extraction_path"] is not None
+    assert call.kwargs["ground_truth_path"] is not None
+    provider.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

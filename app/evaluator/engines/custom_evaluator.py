@@ -1397,11 +1397,15 @@ class CustomEvaluator:
                     )
                 kwargs["ground_truth_path"] = ground_truth_path
             elif "ground_truth_df" in params:
-                if ground_truth_df is None:
+                if ground_truth_df is not None:
+                    kwargs["ground_truth_df"] = ground_truth_df
+                elif ground_truth_path is not None:
+                    # Backward compatibility: pass ground_truth_path as ground_truth_df
+                    kwargs["ground_truth_df"] = ground_truth_path
+                else:
                     raise CustomEvaluationError(
                         f"Function {func.__name__} expects 'ground_truth_df' but CSV ground truth not provided"
                     )
-                kwargs["ground_truth_df"] = ground_truth_df
             else:
                 # Fallback: use second parameter name and pass what we have
                 if len(params) >= 2:
