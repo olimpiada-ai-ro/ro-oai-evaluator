@@ -815,7 +815,7 @@ class TestErrorDetailsIncluded:
         assert "max_size_mb" in error_data["details"]
         assert "max_files" in error_data["details"]
         assert error_data["details"]["max_size_mb"] == 500
-        assert error_data["details"]["max_files"] == 1000
+        assert error_data["details"]["max_files"] == 2000
     
     @pytest.mark.asyncio
     async def test_empty_zip_includes_error_type(self):

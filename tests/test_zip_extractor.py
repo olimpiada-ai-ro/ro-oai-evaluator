@@ -738,7 +738,7 @@ class TestZipExtractor:
         # Create ZIP with reasonable number of files
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for i in range(100):  # Well under 1000 limit
+            for i in range(100):  # Well under 2000 limit
                 zf.writestr(f"file_{i}.txt", f"content {i}")
 
         # Should not raise an error

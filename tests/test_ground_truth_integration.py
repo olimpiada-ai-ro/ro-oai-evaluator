@@ -115,8 +115,8 @@ class TestZipGroundTruthIntegration:
         """Create a ZIP ground truth that exceeds file count limit."""
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Create more than MAX_FILES (1000) files
-            for i in range(1001):
+            # Create more than MAX_FILES (2000) files
+            for i in range(2001):
                 zf.writestr(f'ground_truth_file_{i}.txt', f'label {i}')
         return zip_buffer.getvalue()
     

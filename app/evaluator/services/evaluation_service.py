@@ -1194,7 +1194,7 @@ class EvaluationService:
                 "Common security violations:\n"
                 "- Path traversal attempts (../ sequences in file paths)\n"
                 "- Total extracted size exceeds limit (500MB)\n"
-                "- Too many files in archive (limit: 1000 files)\n"
+                "- Too many files in archive (limit: 2000 files)\n"
                 "- Disallowed file extensions\n\n"
                 "Please ensure your ZIP file complies with security requirements."
             )
@@ -1211,7 +1211,7 @@ class EvaluationService:
                             "security_error": str(e),
                             "error_type": "SecurityViolationError",
                             "max_size_mb": 500,
-                            "max_files": 1000,
+                            "max_files": 2000,
                         },
                         stdout="",
                         stderr=stderr_message,

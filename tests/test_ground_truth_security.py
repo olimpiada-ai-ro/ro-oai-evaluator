@@ -142,8 +142,8 @@ class TestGroundTruthSecurity:
     
     @pytest.mark.asyncio
     @given(
-        # Generate file counts that exceed the 1000 file limit
-        file_count=st.integers(min_value=1001, max_value=1100)
+        # Generate file counts that exceed the 2000 file limit
+        file_count=st.integers(min_value=2001, max_value=2100)
     )
     @settings(
         max_examples=100,
@@ -160,12 +160,12 @@ class TestGroundTruthSecurity:
         """
         service = EvaluationService()
         
-        # Create a ZIP with too many files (>1000)
+        # Create a ZIP with too many files (>2000)
         zip_buffer = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
         
         try:
             with zipfile.ZipFile(zip_buffer.name, 'w') as zf:
-                # Add more than 1000 files
+                # Add more than 2000 files
                 for i in range(file_count):
                     filename = f"file_{i}.txt"
                     content = b"small_content"
@@ -288,13 +288,13 @@ class TestGroundTruthSecurityUnit:
         """Test file count limit enforcement for ground truth."""
         service = EvaluationService()
         
-        # Create a ZIP with > 1000 files
+        # Create a ZIP with > 2000 files
         zip_buffer = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
         
         try:
             with zipfile.ZipFile(zip_buffer.name, 'w') as zf:
-                # Add 1050 files
-                for i in range(1050):
+                # Add 2050 files
+                for i in range(2050):
                     filename = f"file_{i}.txt"
                     content = b"content"
                     zf.writestr(filename, content)
@@ -381,7 +381,7 @@ class TestGroundTruthSecurityUnit:
         zip_buffer = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
         try:
             with zipfile.ZipFile(zip_buffer.name, 'w') as zf:
-                for i in range(1050):
+                for i in range(2050):
                     zf.writestr(f"file_{i}.txt", b"content")
             
             with open(zip_buffer.name, 'rb') as f:
@@ -396,7 +396,7 @@ class TestGroundTruthSecurityUnit:
             content = result.body.decode()
             # Should mention file count
             assert "file" in content.lower()
-            assert "1000" in content or "limit" in content.lower()
+            assert "2000" in content or "limit" in content.lower()
             # Should mention ground truth
             assert "ground truth" in content.lower()
                 
