@@ -325,9 +325,27 @@ class EvaluationService:
                     custom_evaluator is not None
                     and self._has_subtask_functions(custom_evaluator)
                 )
+                subtask_id_routing = (
+                    has_subtasks and custom_evaluator.is_subtask_id_routing_enabled()
+                )
 
                 validation_stderr = ""
-                if has_subtasks:
+                if ground_truth is None:
+                    # Path-based ground truth cannot be prevalidated as records.
+                    # The custom evaluator receives the extracted directory and
+                    # owns format-specific validation.
+                    logger.info(
+                        "Skipping record validation for path-based ground truth",
+                        extra={"request_id": request_id},
+                    )
+                elif has_subtasks and not subtask_id_routing:
+                    # Independent score components intentionally receive the
+                    # complete inputs and are responsible for their own checks.
+                    logger.info(
+                        "Skipping service validation for shared-input subtasks",
+                        extra={"request_id": request_id},
+                    )
+                elif has_subtasks:
                     # For subtask-based evaluation, validate subtaskID matching
                     validation_stderr = self._validate_subtask_predictions(
                         parsed_predictions, ground_truth, request_id, correlation_id
@@ -2135,7 +2153,9 @@ class EvaluationService:
                 logger,
                 "evaluation_computation",
                 prediction_count=len(parsed_predictions),
-                ground_truth_count=len(ground_truth),
+                ground_truth_count=(
+                    len(ground_truth) if ground_truth is not None else None
+                ),
                 custom_script=bool(custom_evaluator),
             ):
                 if custom_evaluator:

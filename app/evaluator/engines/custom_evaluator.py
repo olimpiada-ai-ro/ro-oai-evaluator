@@ -281,6 +281,7 @@ class CustomEvaluator:
         self.compiled_code = None
         self._syntax_tree: Optional[ast.Module] = None
         self._subtask_function_names: List[str] = []
+        self._subtask_id_routing = True
         self.timeout_seconds = (
             float(timeout_seconds)
             if timeout_seconds is not None
@@ -313,6 +314,7 @@ class CustomEvaluator:
             # this tree is the only source used for subtask discovery; discovering
             # functions must never execute participant code.
             syntax_tree = ast.parse(script_content)
+            subtask_id_routing = self._find_subtask_id_routing_in_tree(syntax_tree)
 
             # Compile the script
             self.compiled_code = compile(script_content, "<custom_script>", "exec")
@@ -321,6 +323,7 @@ class CustomEvaluator:
             self._subtask_function_names = self._find_subtask_functions_in_tree(
                 syntax_tree
             )
+            self._subtask_id_routing = subtask_id_routing
 
             logger.info(
                 "Custom evaluation script loaded successfully",
@@ -508,7 +511,7 @@ class CustomEvaluator:
 
             # Detect and execute subtask functions (subtask1, subtask2, ...)
             subtask_functions = self._detect_subtask_functions(exec_namespace)
-            subtask_id_routing = self._subtask_id_routing_enabled(exec_namespace)
+            subtask_id_routing = self.is_subtask_id_routing_enabled()
 
             if subtask_functions:
                 if capture_internal_logs:
@@ -878,7 +881,7 @@ class CustomEvaluator:
 
             # Detect and execute subtask functions
             subtask_functions = self._detect_subtask_functions(exec_namespace)
-            subtask_id_routing = self._subtask_id_routing_enabled(exec_namespace)
+            subtask_id_routing = self.is_subtask_id_routing_enabled()
 
             if subtask_functions:
                 if capture_internal_logs:
@@ -1514,9 +1517,82 @@ class CustomEvaluator:
         subtasks.sort(key=lambda item: item[0])
         return [name for _, name in subtasks]
 
+    @staticmethod
+    def _find_subtask_id_routing_in_tree(syntax_tree: ast.Module) -> bool:
+        """Read the routing opt-out from a top-level literal assignment.
+
+        Service-level validation runs before the evaluator child process starts.
+        It therefore needs this setting without executing the untrusted script in
+        the parent process. Requiring a literal boolean keeps that decision
+        deterministic and consistent with the documented declaration.
+        """
+        routing_enabled = True
+        supported_assignment_nodes = set()
+
+        for node in syntax_tree.body:
+            value_node = None
+            target_names = []
+
+            if isinstance(node, ast.Assign):
+                value_node = node.value
+                target_names = [
+                    target.id for target in node.targets if isinstance(target, ast.Name)
+                ]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                if node.value is None:
+                    continue
+                value_node = node.value
+                target_names = [node.target.id]
+
+            if "SUBTASK_ID_ROUTING" not in target_names:
+                continue
+
+            supported_assignment_nodes.add(id(node))
+
+            if not (
+                isinstance(value_node, ast.Constant)
+                and isinstance(value_node.value, bool)
+            ):
+                raise CustomEvaluationError(
+                    "SUBTASK_ID_ROUTING must be a literal boolean when it is defined"
+                )
+
+            routing_enabled = value_node.value
+
+        # The parent service and child evaluator must use the same routing mode.
+        # Reject nested, tuple, augmented, and expression assignments rather
+        # than letting runtime execution silently override the static decision.
+        for node in ast.walk(syntax_tree):
+            if id(node) in supported_assignment_nodes:
+                continue
+
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets = [node.target]
+
+            assigned_names = {
+                child.id
+                for target in targets
+                for child in ast.walk(target)
+                if isinstance(child, ast.Name)
+            }
+            if "SUBTASK_ID_ROUTING" in assigned_names:
+                raise CustomEvaluationError(
+                    "SUBTASK_ID_ROUTING must be assigned as a top-level "
+                    "literal boolean"
+                )
+
+        return routing_enabled
+
     def get_subtask_function_names(self) -> List[str]:
         """Expose the trusted, AST-derived subtask names for validation paths."""
         return list(self._subtask_function_names)
+
+    def is_subtask_id_routing_enabled(self) -> bool:
+        """Expose the statically parsed routing mode to service validation."""
+        return self._subtask_id_routing
 
     def _detect_subtask_functions(
         self, namespace: Optional[Dict[str, Any]] = None

@@ -119,27 +119,152 @@ class TestEvaluationEngine:
         
         assert "Empty prediction or ground truth data" in str(exc_info.value)
     
-    def test_nan_values_handling(self):
-        """Test handling of NaN values in data."""
+    @pytest.mark.parametrize(
+        "invalid_prediction",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_non_finite_predictions_are_rejected(self, invalid_prediction):
+        """Contestants cannot improve their score by omitting rows with NaN/inf."""
         predictions = [1.0, 2.0, float('nan'), 4.0, 5.0]
-        ground_truth = [1.0, 2.0, 3.0, float('nan'), 5.0]
-        
-        # Should remove NaN values and continue with valid data
-        # Valid pairs: (1.0,1.0), (2.0,2.0), (5.0,5.0) = 3 pairs
-        metrics = self.engine.evaluate(predictions, ground_truth)
-        
-        assert isinstance(metrics, EvaluationMetrics)
-        assert metrics.total_samples == 3  # 3 valid pairs remain
-    
-    def test_all_nan_values_error(self):
-        """Test error when all values are NaN."""
-        predictions = [float('nan'), float('nan')]
-        ground_truth = [float('nan'), float('nan')]
-        
+        predictions[2] = invalid_prediction
+        ground_truth = [1.0, 2.0, 3.0, 4.0, 5.0]
+
         with pytest.raises(DataCompatibilityError) as exc_info:
             self.engine.evaluate(predictions, ground_truth)
-        
-        assert "No valid data remaining" in str(exc_info.value)
+
+        assert "Predictions contain non-finite or missing values" in str(
+            exc_info.value
+        )
+
+    def test_non_finite_prediction_is_rejected_before_mixed_dtype_coercion(self):
+        with pytest.raises(DataCompatibilityError) as exc_info:
+            self.engine.evaluate([0, float("inf"), "invalid"], [0, 1, 2])
+
+        assert "Predictions contain non-finite or missing values" in str(
+            exc_info.value
+        )
+
+    @pytest.mark.parametrize(
+        "invalid_ground_truth",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_non_finite_ground_truth_is_rejected(self, invalid_ground_truth):
+        """Invalid authoritative data must fail instead of changing the denominator."""
+        predictions = [1.0, 2.0, 3.0]
+        ground_truth = [1.0, invalid_ground_truth, 3.0]
+
+        with pytest.raises(DataCompatibilityError) as exc_info:
+            self.engine.evaluate(predictions, ground_truth)
+
+        assert "Ground truth contain non-finite or missing values" in str(
+            exc_info.value
+        )
+
+    def test_documented_prediction_column_is_aligned_by_id(self):
+        """The public id,prediction format is evaluated in ground-truth ID order."""
+        predictions = [
+            {"id": "sample-3", "prediction": 2},
+            {"id": "sample-1", "prediction": 2},
+            {"id": "sample-2", "prediction": 3},
+        ]
+        ground_truth = [
+            {"id": "sample-1", "label": 2},
+            {"id": "sample-2", "label": 3},
+            {"id": "sample-3", "label": 2},
+        ]
+
+        metrics = self.engine.evaluate(predictions, ground_truth)
+
+        assert metrics.accuracy == 1.0
+        assert metrics.f1_score == 1.0
+        assert metrics.total_samples == 3
+
+    def test_preferred_prediction_column_ignores_other_scalar_metadata(self):
+        predictions = [
+            {"id": 1, "prediction": 0, "confidence": 0.9},
+            {"id": 2, "prediction": 1, "confidence": 0.8},
+        ]
+        ground_truth = [
+            {"id": 1, "label": 0, "weight": 2.0},
+            {"id": 2, "label": 1, "weight": 1.0},
+        ]
+
+        metrics = self.engine.evaluate(predictions, ground_truth)
+
+        assert metrics.accuracy == 1.0
+
+    def test_single_scalar_column_is_supported(self):
+        predictions = [{"id": 1, "answer": 0}, {"id": 2, "answer": 1}]
+        ground_truth = [{"id": 1, "expected": 0}, {"id": 2, "expected": 1}]
+
+        metrics = self.engine.evaluate(predictions, ground_truth)
+
+        assert metrics.accuracy == 1.0
+
+    def test_mismatched_ids_are_rejected(self):
+        predictions = [
+            {"id": "one", "prediction": 0},
+            {"id": "extra", "prediction": 1},
+        ]
+        ground_truth = [
+            {"id": "one", "label": 0},
+            {"id": "missing", "label": 1},
+        ]
+
+        with pytest.raises(DataCompatibilityError) as exc_info:
+            self.engine.evaluate(predictions, ground_truth)
+
+        assert "IDs do not match" in str(exc_info.value)
+        assert "missing" in str(exc_info.value)
+        assert "extra" in str(exc_info.value)
+
+    @pytest.mark.parametrize("duplicate_side", ["predictions", "ground_truth"])
+    def test_duplicate_ids_are_rejected(self, duplicate_side):
+        predictions = [
+            {"id": 1, "prediction": 0},
+            {"id": 2, "prediction": 1},
+        ]
+        ground_truth = [
+            {"id": 1, "label": 0},
+            {"id": 2, "label": 1},
+        ]
+        target = predictions if duplicate_side == "predictions" else ground_truth
+        target[1]["id"] = 1
+
+        with pytest.raises(DataCompatibilityError) as exc_info:
+            self.engine.evaluate(predictions, ground_truth)
+
+        assert f"Duplicate IDs in {duplicate_side.replace('_', ' ')}" in str(
+            exc_info.value
+        )
+
+    def test_arbitrary_binary_labels_use_the_greater_label_as_positive(self):
+        predictions = [2, 3, 2, 2, 2, 3]
+        ground_truth = [2, 3, 2, 3, 2, 3]
+
+        metrics = self.engine.evaluate(predictions, ground_truth)
+
+        assert metrics.accuracy == pytest.approx(5 / 6)
+        assert metrics.precision == 1.0
+        assert metrics.recall == pytest.approx(2 / 3)
+        assert metrics.f1_score == pytest.approx(0.8)
+
+    def test_one_class_labels_are_supported(self):
+        metrics = self.engine.evaluate([7, 7, 7], [7, 7, 7])
+
+        assert metrics.accuracy == 1.0
+        assert metrics.precision == 1.0
+        assert metrics.recall == 1.0
+        assert metrics.f1_score == 1.0
+
+    def test_partial_binary_score_keeps_full_dataset_positive_label(self):
+        """A negative-only partial slice must not redefine the positive class."""
+        metrics = self.engine.evaluate([0, 0, 1], [0, 0, 1])
+
+        assert metrics.complete_metric == 1.0
+        assert metrics.complete_score == 60.0
+        assert metrics.partial_metric == 0.0
+        assert metrics.partial_score == 0.0
     
     def test_data_compatibility_check_compatible(self):
         """Test data compatibility check for compatible data."""

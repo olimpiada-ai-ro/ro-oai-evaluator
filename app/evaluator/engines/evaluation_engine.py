@@ -4,7 +4,7 @@ Evaluation Engine for computing metrics between predictions and ground truth dat
 
 import numpy as np
 import pandas as pd
-from typing import List, Any, Union, Dict, Tuple
+from typing import List, Any, Dict, Tuple
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import confusion_matrix, classification_report
@@ -100,16 +100,14 @@ class EvaluationEngine:
             EvaluationMetrics with partial/complete scores added
         """
         from sklearn import model_selection
-        import pandas as pd
         
         try:
-            # Extract label values if predictions/ground_truth are dictionaries
-            if predictions and isinstance(predictions[0], dict):
-                pred_values = [p.get('label', p.get('value', p)) for p in predictions]
-                truth_values = [g.get('label', g.get('value', g)) for g in ground_truth]
-            else:
-                pred_values = predictions
-                truth_values = ground_truth
+            # Use the same value extraction, ID alignment, and validation as the
+            # complete evaluation. This is important for the documented
+            # ``id,prediction`` format: splitting the raw dictionaries would
+            # otherwise produce object-valued rows and silently fall back to the
+            # complete score.
+            pred_values, truth_values = self._align_data(predictions, ground_truth)
             
             # Create DataFrame for splitting
             df = pd.DataFrame({
@@ -136,11 +134,22 @@ class EvaluationEngine:
                 task_type = self._detect_task_type(aligned_partial_truth)
                 
                 if task_type == "classification":
-                    partial_metrics = self._compute_classification_metrics(aligned_partial_pred, aligned_partial_truth)
+                    # Keep the full dataset's positive-label policy. Deriving it
+                    # from the random partial slice would treat class 0 as
+                    # positive whenever that slice happens not to contain class 1.
+                    partial_metric = float(
+                        f1_score(
+                            aligned_partial_truth,
+                            aligned_partial_pred,
+                            zero_division=0,
+                            **self._classification_metric_options(
+                                pred_values, truth_values
+                            ),
+                        )
+                    )
                 else:
                     partial_metrics = self._compute_regression_metrics(aligned_partial_pred, aligned_partial_truth)
-                
-                partial_metric = partial_metrics.f1_score
+                    partial_metric = partial_metrics.f1_score
             else:
                 # If only one sample, use complete metrics
                 partial_metric = metrics.f1_score
@@ -251,17 +260,59 @@ class EvaluationEngine:
         Raises:
             DataCompatibilityError: If data cannot be aligned
         """
-        # Extract label values if predictions/ground_truth are dictionaries
-        if predictions and isinstance(predictions[0], dict):
-            pred_values = [p.get('label', p.get('value', p)) for p in predictions]
-        else:
-            pred_values = predictions
-            
-        if ground_truth and isinstance(ground_truth[0], dict):
-            truth_values = [g.get('label', g.get('value', g)) for g in ground_truth]
-        else:
-            truth_values = ground_truth
-        
+        pred_values, prediction_ids = self._extract_values(
+            predictions, data_name="predictions"
+        )
+        truth_values, ground_truth_ids = self._extract_values(
+            ground_truth, data_name="ground truth"
+        )
+
+        # CSV and JSON records commonly carry stable IDs. When both sides
+        # provide them, compare the ID sets and order predictions to match the
+        # trusted ground-truth order instead of relying on row order.
+        if prediction_ids is not None and ground_truth_ids is not None:
+            prediction_by_id = dict(zip(prediction_ids, pred_values))
+            ground_truth_id_set = set(ground_truth_ids)
+            prediction_id_set = set(prediction_ids)
+
+            if prediction_id_set != ground_truth_id_set:
+                missing_ids = [
+                    item_id
+                    for item_id in ground_truth_ids
+                    if item_id not in prediction_id_set
+                ]
+                unexpected_ids = [
+                    item_id
+                    for item_id in prediction_ids
+                    if item_id not in ground_truth_id_set
+                ]
+                details = []
+                if missing_ids:
+                    details.append(
+                        f"missing prediction IDs: {missing_ids[:5]}"
+                    )
+                if unexpected_ids:
+                    details.append(
+                        f"unexpected prediction IDs: {unexpected_ids[:5]}"
+                    )
+                raise DataCompatibilityError(
+                    "Prediction and ground-truth IDs do not match"
+                    + (f" ({'; '.join(details)})" if details else "")
+                )
+
+            pred_values = [
+                prediction_by_id[item_id] for item_id in ground_truth_ids
+            ]
+
+        # Validate before NumPy infers a common string dtype for mixed input;
+        # otherwise a numeric infinity could be converted to the literal "inf".
+        self._reject_non_finite_values(
+            np.asarray(pred_values, dtype=object), data_name="Predictions"
+        )
+        self._reject_non_finite_values(
+            np.asarray(truth_values, dtype=object), data_name="Ground truth"
+        )
+
         # Convert to numpy arrays for easier manipulation
         try:
             pred_array = np.array(pred_values)
@@ -285,19 +336,197 @@ class EvaluationEngine:
             pred_array = pred_array.flatten()
             truth_array = truth_array.flatten()
         
-        # Check for NaN values (only for numeric data)
-        if pred_array.dtype.kind in 'biufc' and truth_array.dtype.kind in 'biufc':  # numeric types
-            if np.isnan(pred_array).any() or np.isnan(truth_array).any():
-                self.logger.warning("NaN values detected in data, removing them")
-                valid_mask = ~(np.isnan(pred_array) | np.isnan(truth_array))
-                pred_array = pred_array[valid_mask]
-                truth_array = truth_array[valid_mask]
-                
-                if len(pred_array) == 0:
-                    raise DataCompatibilityError("No valid data remaining after removing NaN values")
+        # Never remove contestant rows from scoring. Dropping non-finite
+        # predictions would let a submission omit difficult samples and inflate
+        # its score. Invalid ground truth is also rejected so an authoritative
+        # result is never computed over an accidental subset.
+        self._reject_non_finite_values(pred_array, data_name="Predictions")
+        self._reject_non_finite_values(truth_array, data_name="Ground truth")
         
         self.logger.info(f"Data aligned successfully: {len(pred_array)} samples")
         return pred_array, truth_array
+
+    def _extract_values(
+        self, data: List[Any], data_name: str
+    ) -> Tuple[List[Any], Optional[List[str]]]:
+        """Extract one scalar score/label column and optional IDs from records."""
+        if len(data) == 0:
+            return data, None
+
+        if not any(isinstance(item, dict) for item in data):
+            return data, None
+        if not all(isinstance(item, dict) for item in data):
+            raise DataCompatibilityError(
+                f"{data_name.capitalize()} must not mix records and scalar values"
+            )
+
+        records = data
+        has_ids = any("id" in record for record in records)
+        if has_ids and not all("id" in record for record in records):
+            raise DataCompatibilityError(
+                f"Every {data_name} row must include an ID when any row includes one"
+            )
+
+        ids: Optional[List[str]] = None
+        if has_ids:
+            ids = [
+                self._normalize_id(record["id"], data_name, row_index)
+                for row_index, record in enumerate(
+                    records, start=1
+                )
+            ]
+            seen_ids = set()
+            duplicate_ids = set()
+            for item_id in ids:
+                if item_id in seen_ids:
+                    duplicate_ids.add(item_id)
+                seen_ids.add(item_id)
+            if duplicate_ids:
+                raise DataCompatibilityError(
+                    f"Duplicate IDs in {data_name}: {sorted(duplicate_ids)[:5]}"
+                )
+
+        value_key = self._select_value_key(records, data_name)
+        values = []
+        for row_index, record in enumerate(records, start=1):
+            if value_key not in record:
+                raise DataCompatibilityError(
+                    f"Missing '{value_key}' value in {data_name} row {row_index}"
+                )
+            value = record[value_key]
+            if not self._is_scalar(value):
+                raise DataCompatibilityError(
+                    f"Column '{value_key}' in {data_name} must contain scalar values"
+                )
+            values.append(value)
+
+        return values, ids
+
+    def _select_value_key(
+        self, records: List[Dict[str, Any]], data_name: str
+    ) -> str:
+        """Choose a documented/legacy value column, or one unambiguous scalar column."""
+        preferred_columns = (
+            ("prediction", "label", "value")
+            if data_name == "predictions"
+            else ("label", "prediction", "value")
+        )
+
+        available_columns = {
+            key for record in records for key in record
+        }
+
+        for preferred_column in preferred_columns:
+            if preferred_column in available_columns:
+                if not all(preferred_column in record for record in records):
+                    raise DataCompatibilityError(
+                        f"Column '{preferred_column}' must be present in every "
+                        f"{data_name} row"
+                    )
+                return preferred_column
+
+        scalar_candidates = [
+            key
+            for key in available_columns
+            if key != "id"
+            and all(
+                key in record and self._is_scalar(record[key])
+                for record in records
+            )
+        ]
+
+        if len(scalar_candidates) == 1:
+            return scalar_candidates[0]
+        if not scalar_candidates:
+            raise DataCompatibilityError(
+                f"No scalar value column found in {data_name}"
+            )
+        raise DataCompatibilityError(
+            f"Ambiguous value columns in {data_name}: {scalar_candidates}. "
+            "Use a documented column name."
+        )
+
+    @staticmethod
+    def _is_scalar(value: Any) -> bool:
+        return value is None or bool(np.isscalar(value))
+
+    @staticmethod
+    def _normalize_id(value: Any, data_name: str, row_index: int) -> str:
+        if isinstance(value, np.generic):
+            value = value.item()
+
+        try:
+            missing = pd.isna(value)
+        except (TypeError, ValueError):
+            missing = False
+        if isinstance(missing, (bool, np.bool_)) and missing:
+            raise DataCompatibilityError(
+                f"Missing ID in {data_name} row {row_index}"
+            )
+
+        if isinstance(value, str):
+            normalized = value.strip()
+        elif isinstance(value, bool):
+            normalized = str(value).lower()
+        elif isinstance(value, int):
+            normalized = str(value)
+        elif isinstance(value, float):
+            if not np.isfinite(value):
+                raise DataCompatibilityError(
+                    f"Non-finite ID in {data_name} row {row_index}"
+                )
+            normalized = (
+                str(int(value)) if value.is_integer() else format(value, ".17g")
+            )
+        elif np.isscalar(value):
+            normalized = str(value)
+        else:
+            raise DataCompatibilityError(
+                f"ID in {data_name} row {row_index} must be a scalar value"
+            )
+
+        if not normalized:
+            raise DataCompatibilityError(
+                f"Empty ID in {data_name} row {row_index}"
+            )
+        return normalized
+
+    @staticmethod
+    def _reject_non_finite_values(array: np.ndarray, data_name: str) -> None:
+        invalid_positions = []
+        for index, value in enumerate(array.flat):
+            if isinstance(value, np.generic):
+                value = value.item()
+
+            is_invalid = False
+            if value is None:
+                is_invalid = True
+            elif isinstance(value, (int, float, complex, np.number)) and not isinstance(
+                value, bool
+            ):
+                try:
+                    is_invalid = not bool(np.isfinite(value))
+                except TypeError:
+                    is_invalid = False
+            else:
+                try:
+                    missing = pd.isna(value)
+                    is_invalid = (
+                        isinstance(missing, (bool, np.bool_)) and bool(missing)
+                    )
+                except (TypeError, ValueError):
+                    is_invalid = False
+
+            if is_invalid:
+                invalid_positions.append(index)
+                if len(invalid_positions) == 5:
+                    break
+
+        if invalid_positions:
+            raise DataCompatibilityError(
+                f"{data_name} contain non-finite or missing values at "
+                f"positions {invalid_positions}"
+            )
     
     def _detect_task_type(self, ground_truth: np.ndarray) -> str:
         """
@@ -388,18 +617,28 @@ class EvaluationEngine:
             
             # Compute complete (100%) metrics
             accuracy = accuracy_score(truth_numeric, pred_numeric)
-            
-            # For multi-class, use macro averaging
-            unique_classes = np.unique(truth_numeric)
-            if len(unique_classes) > 2:
-                precision = precision_score(truth_numeric, pred_numeric, average='macro', zero_division=0)
-                recall = recall_score(truth_numeric, pred_numeric, average='macro', zero_division=0)
-                f1 = f1_score(truth_numeric, pred_numeric, average='macro', zero_division=0)
-            else:
-                # Binary classification
-                precision = precision_score(truth_numeric, pred_numeric, zero_division=0)
-                recall = recall_score(truth_numeric, pred_numeric, zero_division=0)
-                f1 = f1_score(truth_numeric, pred_numeric, zero_division=0)
+
+            metric_options = self._classification_metric_options(
+                pred_numeric, truth_numeric
+            )
+            precision = precision_score(
+                truth_numeric,
+                pred_numeric,
+                zero_division=0,
+                **metric_options,
+            )
+            recall = recall_score(
+                truth_numeric,
+                pred_numeric,
+                zero_division=0,
+                **metric_options,
+            )
+            f1 = f1_score(
+                truth_numeric,
+                pred_numeric,
+                zero_division=0,
+                **metric_options,
+            )
             
             correct_predictions = int(np.sum(pred_numeric == truth_numeric))
             total_samples = len(truth_numeric)
@@ -434,10 +673,12 @@ class EvaluationEngine:
                     partial_pred = partial_df['pred'].values
                     partial_truth = partial_df['truth'].values
                     
-                    if len(np.unique(partial_truth)) > 2:
-                        partial_f1 = f1_score(partial_truth, partial_pred, average='macro', zero_division=0)
-                    else:
-                        partial_f1 = f1_score(partial_truth, partial_pred, zero_division=0)
+                    partial_f1 = f1_score(
+                        partial_truth,
+                        partial_pred,
+                        zero_division=0,
+                        **metric_options,
+                    )
                     
                     partial_metric = float(partial_f1)
                     partial_score = self._custom_score(partial_metric)
@@ -462,6 +703,31 @@ class EvaluationEngine:
             
         except Exception as e:
             raise DataCompatibilityError(f"Failed to compute classification metrics: {str(e)}")
+
+    @staticmethod
+    def _classification_metric_options(
+        predictions: np.ndarray, ground_truth: np.ndarray
+    ) -> Dict[str, Any]:
+        """
+        Select label-safe classification averaging.
+
+        Preserve the historical 0/1 convention by treating the greater of two
+        ground-truth labels as positive, while supporting any numeric or mapped
+        string labels. A one-class test set treats its only known class as
+        positive. Macro averaging is used if predictions introduce enough extra
+        labels to make binary averaging invalid.
+        """
+        truth_classes = np.unique(ground_truth)
+        observed_classes = np.unique(
+            np.concatenate([predictions, ground_truth])
+        )
+
+        if 1 <= len(truth_classes) <= 2 and len(observed_classes) <= 2:
+            return {
+                "average": "binary",
+                "pos_label": truth_classes[-1],
+            }
+        return {"average": "macro"}
     
     def _compute_detailed_classification_results(self, predictions: np.ndarray, ground_truth: np.ndarray) -> DetailedEvaluationResults:
         """
@@ -491,61 +757,55 @@ class EvaluationEngine:
             else:
                 pred_numeric = predictions.astype(int)
                 truth_numeric = ground_truth.astype(int)
-                unique_labels = np.unique(truth_numeric)
+                unique_labels = np.unique(
+                    np.concatenate([pred_numeric, truth_numeric])
+                )
                 class_labels = [str(label) for label in unique_labels]
                 int_to_label = {i: str(i) for i in unique_labels}
             
             # Determine data type
-            unique_classes = np.unique(truth_numeric)
+            unique_classes = np.unique(
+                np.concatenate([pred_numeric, truth_numeric])
+            )
             data_type = "binary" if len(unique_classes) == 2 else "multiclass"
             
             # Compute confusion matrix
-            cm = confusion_matrix(truth_numeric, pred_numeric)
+            cm = confusion_matrix(
+                truth_numeric, pred_numeric, labels=unique_classes
+            )
             
             # Compute per-class metrics
             per_class_metrics = {}
-            if len(unique_classes) > 2:
-                # Multi-class metrics
-                precision_per_class = precision_score(truth_numeric, pred_numeric, average=None, zero_division=0)
-                recall_per_class = recall_score(truth_numeric, pred_numeric, average=None, zero_division=0)
-                f1_per_class = f1_score(truth_numeric, pred_numeric, average=None, zero_division=0)
-                
-                for i, class_idx in enumerate(unique_classes):
-                    class_label = int_to_label.get(class_idx, str(class_idx))
-                    per_class_metrics[class_label] = {
-                        "precision": float(precision_per_class[i]),
-                        "recall": float(recall_per_class[i]),
-                        "f1_score": float(f1_per_class[i]),
-                        "support": int(np.sum(truth_numeric == class_idx))
-                    }
-            else:
-                # Binary classification
-                precision_val = precision_score(truth_numeric, pred_numeric, zero_division=0)
-                recall_val = recall_score(truth_numeric, pred_numeric, zero_division=0)
-                f1_val = f1_score(truth_numeric, pred_numeric, zero_division=0)
-                
-                for class_idx in unique_classes:
-                    class_label = int_to_label.get(class_idx, str(class_idx))
-                    if class_idx == 1:  # Positive class
-                        per_class_metrics[class_label] = {
-                            "precision": float(precision_val),
-                            "recall": float(recall_val),
-                            "f1_score": float(f1_val),
-                            "support": int(np.sum(truth_numeric == class_idx))
-                        }
-                    else:  # Negative class
-                        # For negative class, compute inverse metrics
-                        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-                        neg_precision = tn / (tn + fn) if (tn + fn) > 0 else 0
-                        neg_recall = tn / (tn + fp) if (tn + fp) > 0 else 0
-                        neg_f1 = 2 * (neg_precision * neg_recall) / (neg_precision + neg_recall) if (neg_precision + neg_recall) > 0 else 0
-                        
-                        per_class_metrics[class_label] = {
-                            "precision": float(neg_precision),
-                            "recall": float(neg_recall),
-                            "f1_score": float(neg_f1),
-                            "support": int(np.sum(truth_numeric == class_idx))
-                        }
+            precision_per_class = precision_score(
+                truth_numeric,
+                pred_numeric,
+                labels=unique_classes,
+                average=None,
+                zero_division=0,
+            )
+            recall_per_class = recall_score(
+                truth_numeric,
+                pred_numeric,
+                labels=unique_classes,
+                average=None,
+                zero_division=0,
+            )
+            f1_per_class = f1_score(
+                truth_numeric,
+                pred_numeric,
+                labels=unique_classes,
+                average=None,
+                zero_division=0,
+            )
+
+            for i, class_idx in enumerate(unique_classes):
+                class_label = int_to_label.get(class_idx, str(class_idx))
+                per_class_metrics[class_label] = {
+                    "precision": float(precision_per_class[i]),
+                    "recall": float(recall_per_class[i]),
+                    "f1_score": float(f1_per_class[i]),
+                    "support": int(np.sum(truth_numeric == class_idx)),
+                }
             
             # Compute data statistics
             prediction_stats = self._compute_data_statistics(predictions, "predictions")
