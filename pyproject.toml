@@ -1,0 +1,78 @@
+[tool.poetry]
+name = "ai-olympiad-evaluator"
+version = "1.0.0"
+description = "Stateless evaluator service for AI olympiad predictions"
+authors = ["AI Olympiad Team <team@example.com>"]
+readme = "README.md"
+packages = [{include = "app"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.139.0"
+starlette = "^1.3.1"
+uvicorn = {extras = ["standard"], version = "^0.51.0"}
+pydantic-settings = "^2.14.2"
+python-dotenv = "^1.2.2"
+python-multipart = "^0.0.32"
+# AI Olympiad Evaluator dependencies
+boto3 = ">=1.40.46,<1.40.62"
+aioboto3 = "^15.5.0"
+aiohttp = "^3.14.1"
+urllib3 = "^2.7.0"
+click = "^8.3.3"
+h11 = "^0.16.0"
+idna = "^3.15"
+pandas = "^2.1.4"
+scikit-learn = "^1.3.2"
+numpy = "^1.26.0"
+scipy = "^1.11.0"
+aiofiles = "^23.2.0"
+psutil = "^5.9.6"
+aio-pika = "^9.3.0"
+pyyaml = "^6.0.1"
+# Image processing libraries for segmentation tasks
+pillow = "^12.3.0"
+opencv-python-headless = "^4.11.0.86"
+# Contestant workers run with this interpreter. Use the official CPU-only build so
+# PyTorch submissions do not pull CUDA/NVIDIA packages into the evaluator image.
+torch = { version = "2.13.0+cpu", source = "pytorch-cpu" }
+# Pin the model runtime exactly so evaluator behavior stays reproducible across
+# image rebuilds. PyTorch is already installed above, so avoid the transformers
+# "torch" extra and its unrelated training dependencies.
+transformers = "5.14.1"
+safetensors = "0.8.0"
+setuptools = "^83.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1.1"
+pytest-asyncio = "^1.4.0"
+httpx = "^0.28.1"
+black = "^26.3.1"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+mypy = "^1.5.0"
+pytest-cov = "^4.1.0"
+aio-pika = "^9.5.7"
+hypothesis = "^6.92.0"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

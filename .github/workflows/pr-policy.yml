@@ -1,0 +1,97 @@
+name: Public boundary
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  boundary-policy:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load changed paths without running contributor code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+            > "$RUNNER_TEMP/changed-files.json"
+
+      - name: Enforce bidirectional path boundary
+        env:
+          CHANGED_FILES_JSON: ${{ runner.temp }}/changed-files.json
+          PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import PurePosixPath
+
+          allowed_files = {"poetry.lock", "pyproject.toml"}
+          allowed_python_roots = {"app", "test_data", "test_payloads", "tests"}
+          denied = {
+              "tests/test_kubernetes_health_probes.py",
+          }
+          trusted_private_mirror = (
+              os.environ["PR_AUTHOR_TYPE"] == "Bot"
+              and os.environ["PR_AUTHOR_LOGIN"] == "ro-oai-public-mirror[bot]"
+              and os.environ["PR_BASE_REF"] == "main"
+              and os.environ["PR_HEAD_REF"] == "mirror/private-main"
+              and os.environ["PR_HEAD_REPOSITORY"].lower()
+                  == os.environ["TARGET_REPOSITORY"].lower()
+          )
+
+          with open(os.environ["CHANGED_FILES_JSON"], encoding="utf-8") as stream:
+              pages = json.load(stream)
+          files = [item for page in pages for item in page]
+          rejected = []
+          for item in files:
+              paths = [item["filename"]]
+              if item.get("previous_filename"):
+                  paths.append(item["previous_filename"])
+              for path in paths:
+                  pure = PurePosixPath(path)
+                  unsafe = (
+                      path != path.strip()
+                      or "\\" in path
+                      or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                      or any(part in {"", ".", ".."} for part in pure.parts)
+                  )
+                  if unsafe:
+                      rejected.append(path)
+                      continue
+                  if trusted_private_mirror:
+                      continue
+                  allowed_path = (
+                      path in allowed_files
+                      or (
+                          len(pure.parts) >= 2
+                          and pure.parts[0] in allowed_python_roots
+                          and pure.suffix == ".py"
+                      )
+                  )
+                  if not allowed_path or path in denied:
+                      rejected.append(path)
+          if rejected:
+              for path in sorted(rejected):
+                  print(f"Public-only or forbidden path cannot be changed: {path!r}")
+              raise SystemExit(1)
+          print("Changed paths are within the bidirectional boundary")
+          PY

@@ -1,0 +1,1 @@
+# RabbitMQ messaging module
