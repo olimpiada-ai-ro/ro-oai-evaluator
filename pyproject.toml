@@ -3,6 +3,7 @@ name = "ai-olympiad-evaluator"
 version = "1.0.0"
 description = "Stateless evaluator service for AI olympiad predictions"
 authors = ["AI Olympiad Team <team@example.com>"]
+license = "Proprietary"
 readme = "README.md"
 packages = [{include = "app"}]
 

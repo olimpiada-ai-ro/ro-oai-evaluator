@@ -17,5 +17,6 @@ poetry run pytest
 ```
 
 By submitting a pull request, you confirm that you have the right to contribute
-the proposed material. This repository does not currently publish a software
-license.
+the proposed material and agree to the contribution grant in [`LICENSE`](LICENSE).
+The repository remains proprietary; submitting a contribution does not grant
+the public any right to reuse its source.
