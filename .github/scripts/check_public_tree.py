@@ -24,6 +24,7 @@ REQUIRED_PATHS = {
     ".github/workflows/pr-policy.yml",
     ".gitignore",
     "CONTRIBUTING.md",
+    "LICENSE",
     "README.md",
     "app/main.py",
     "poetry.lock",
@@ -39,6 +40,7 @@ TRUSTED_OVERLAY_PATHS = (
     ".github/workflows/pr-policy.yml",
     ".gitignore",
     "CONTRIBUTING.md",
+    "LICENSE",
     "README.md",
 )
 
@@ -89,7 +91,6 @@ FORBIDDEN_BASENAMES = {
     "config.yaml",
     "dockerfile",
     "gemini.md",
-    "license",
     "license.md",
     "makefile",
     "product.md",

@@ -9,3 +9,4 @@ Describe the evaluator behavior changed by this pull request.
 - [ ] `poetry run pytest` passes.
 - [ ] This change contains no credentials, private data, deployment code, or
       generated artifacts.
+- [ ] I have read `LICENSE` and agree to its contribution terms.

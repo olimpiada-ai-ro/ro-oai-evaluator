@@ -24,3 +24,10 @@ the application can be imported and tested locally without credentials.
 
 Changes are accepted through pull requests. Please read
 [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening one.
+
+## License
+
+This is source-available proprietary software, not open-source software. You
+may inspect it and prepare contributions, but reuse, deployment,
+redistribution, and AI/ML training are prohibited without prior written
+permission. See [`LICENSE`](LICENSE) for the complete terms.
