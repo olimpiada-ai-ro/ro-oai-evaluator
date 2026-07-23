@@ -1,0 +1,1 @@
+# AI Olympiad Evaluator package

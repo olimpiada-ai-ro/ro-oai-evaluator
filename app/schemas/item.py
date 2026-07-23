@@ -1,0 +1,23 @@
+from pydantic import BaseModel
+from typing import Optional
+
+
+class ItemBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class ItemCreate(ItemBase):
+    pass
+
+
+class Item(ItemBase):
+    id: int
+    
+    model_config = {"from_attributes": True}
+
+
+class ItemResponse(ItemBase):
+    id: int
+    
+    model_config = {"from_attributes": True}
