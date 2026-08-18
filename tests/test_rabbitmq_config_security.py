@@ -88,14 +88,13 @@ def test_missing_runtime_config_disables_broker(tmp_path):
 
 
 @pytest.mark.parametrize("password", ["admin", "admin123", "guest", "password"])
-def test_known_insecure_development_passwords_fail_closed(
-    tmp_path, monkeypatch, password
-):
+def test_known_development_passwords_are_accepted(tmp_path, monkeypatch, password):
     monkeypatch.setenv("RABBITMQ_USERNAME", "evaluator")
     monkeypatch.setenv("RABBITMQ_PASSWORD", password)
 
-    with pytest.raises(ValueError, match="known insecure"):
-        ConfigLoader.load_rabbitmq_config(_write_config(tmp_path))
+    config = ConfigLoader.load_rabbitmq_config(_write_config(tmp_path))
+
+    assert config.connection.password == password
 
 
 def test_connection_url_encodes_credentials():

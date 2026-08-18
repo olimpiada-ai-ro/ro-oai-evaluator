@@ -118,7 +118,7 @@ class Settings(BaseSettings):
         description="Maximum total uncompressed archive size",
     )
     ZIP_MAX_FILES: int = Field(
-        default=1_000, ge=1, le=500_000, description="Maximum number of archive entries"
+        default=2_000, ge=1, le=500_000, description="Maximum number of archive entries"
     )
     ZIP_MAX_SINGLE_FILE_MB: int = Field(
         default=500,

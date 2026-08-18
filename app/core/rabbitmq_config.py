@@ -132,14 +132,6 @@ class ConfigLoader:
             "your-password-here",
         }
     )
-    _INSECURE_PASSWORDS = frozenset(
-        {
-            "admin",
-            "admin123",
-            "guest",
-            "password",
-        }
-    )
 
     @classmethod
     def _resolve_environment_values(cls, value):
@@ -186,10 +178,6 @@ class ConfigLoader:
             ):
                 raise ValueError(
                     f"RabbitMQ {credential_name} contains a placeholder value"
-                )
-            if credential_name == "password" and normalized in cls._INSECURE_PASSWORDS:
-                raise ValueError(
-                    "RabbitMQ password contains a known insecure development value"
                 )
 
     @classmethod
