@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import zipfile
 
 import numpy as np
@@ -261,5 +262,73 @@ async def test_ground_truth_cannot_be_duplicated_in_a_publishable_asset():
 
     with pytest.raises(
         ProblemProposalAssetValidationError, match="Ground truth content"
+    ):
+        await ProblemProposalAssetValidator().validate_message(_message(assets))
+
+
+def _notebook(cells=None) -> bytes:
+    return json.dumps(
+        {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": cells
+            if cells is not None
+            else [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["# Supporting notebook\n"],
+                }
+            ],
+        }
+    ).encode("utf-8")
+
+
+def _patch_fetch(monkeypatch, contents):
+    async def fetch_dataset(_self, url):
+        return contents[url.rsplit("/", 1)[-1]]
+
+    async def close(_self):
+        return None
+
+    monkeypatch.setattr(RemoteURLProvider, "fetch_dataset", fetch_dataset)
+    monkeypatch.setattr(RemoteURLProvider, "close", close)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_id", "file_name", "payload"),
+    [
+        ("helper", "helper.py", b"def score():\n    return 1\n"),
+        ("notebook", "analysis.ipynb", _notebook()),
+    ],
+)
+async def test_supporting_python_and_jupyter_files_are_accepted(
+    monkeypatch, asset_id, file_name, payload
+):
+    contents, assets = _inventory()
+    contents[asset_id] = payload
+    assets.append(_asset(asset_id, "SUPPORTING_FILE", file_name, payload))
+    _patch_fetch(monkeypatch, contents)
+
+    checks = await ProblemProposalAssetValidator().validate_message(_message(assets))
+
+    assert all(check["passed"] for check in checks)
+    assert any(check["code"] == f"ASSET_SUPPORTING_FILE_{asset_id}" for check in checks)
+
+
+@pytest.mark.asyncio
+async def test_invalid_supporting_notebook_is_rejected(monkeypatch):
+    contents, assets = _inventory()
+    payload = b'{"cells": []}'
+    contents["notebook"] = payload
+    assets.append(
+        _asset("notebook", "SUPPORTING_FILE", "analysis.ipynb", payload)
+    )
+    _patch_fetch(monkeypatch, contents)
+
+    with pytest.raises(
+        ProblemProposalAssetValidationError, match="valid Jupyter notebook"
     ):
         await ProblemProposalAssetValidator().validate_message(_message(assets))

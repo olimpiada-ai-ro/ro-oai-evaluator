@@ -101,6 +101,8 @@ class ProblemProposalAssetValidator:
             ".txt",
             ".csv",
             ".json",
+            ".py",
+            ".ipynb",
             ".png",
             ".jpg",
             ".jpeg",
@@ -331,6 +333,8 @@ class ProblemProposalAssetValidator:
                 raise ProblemProposalAssetValidationError(
                     f"{asset.file_name} is not valid JSON: {exc}"
                 ) from exc
+        elif extension == ".ipynb":
+            self._validate_notebook(asset.file_name, content)
         elif extension in {".npy", ".npz"}:
             try:
                 PredictionParser().parse(content, extension.removeprefix("."))
@@ -350,6 +354,24 @@ class ProblemProposalAssetValidator:
         elif extension in {".jpg", ".jpeg"} and not content.startswith(b"\xff\xd8\xff"):
             raise ProblemProposalAssetValidationError(
                 f"{asset.file_name} is not a valid JPEG"
+            )
+
+    def _validate_notebook(self, file_name: str, content: bytes) -> None:
+        try:
+            notebook = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProblemProposalAssetValidationError(
+                f"{file_name} is not valid Jupyter notebook JSON: {exc}"
+            ) from exc
+        if not isinstance(notebook, dict):
+            raise ProblemProposalAssetValidationError(
+                f"{file_name} is not a valid Jupyter notebook"
+            )
+        cells = notebook.get("cells")
+        nbformat = notebook.get("nbformat")
+        if not isinstance(cells, list) or not isinstance(nbformat, int):
+            raise ProblemProposalAssetValidationError(
+                f"{file_name} is not a valid Jupyter notebook"
             )
 
     def _validate_zip(self, file_name: str, content: bytes) -> None:
