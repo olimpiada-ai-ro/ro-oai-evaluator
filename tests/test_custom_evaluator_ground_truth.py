@@ -696,3 +696,24 @@ def compute_scores(extraction_path, ground_truth_df):
             assert result is not None
             assert 'main' in result
 
+    def test_ground_truth_path_is_passed_to_ground_truth_df_parameter(self):
+        """Path-based NumPy ground truth can still use a ground_truth_df signature."""
+        script = """
+def compute_scores(predictions_df, ground_truth_df):
+    assert isinstance(ground_truth_df, str)
+    return (50.0, 0.5, 75.0, 0.75)
+"""
+        evaluator = CustomEvaluator()
+        evaluator.load_script(script)
+        exec_namespace = {}
+        exec(evaluator.compiled_code, exec_namespace, exec_namespace)
+        compute_scores = exec_namespace["compute_scores"]
+
+        result = evaluator._call_with_signature_detection(
+            compute_scores,
+            predictions_df=__import__("pandas").DataFrame([{"id": 1, "prediction": 0}]),
+            ground_truth_path="/tmp/ground-truth.npz",
+        )
+
+        assert result == (50.0, 0.5, 75.0, 0.75)
+
