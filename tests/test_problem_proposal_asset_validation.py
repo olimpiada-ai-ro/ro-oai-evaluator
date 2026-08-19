@@ -162,6 +162,35 @@ async def test_numpy_sample_and_reference_submissions_are_accepted(
 @pytest.mark.asyncio
 async def test_invalid_npz_sample_is_rejected_during_preflight(monkeypatch):
     contents, assets = _inventory()
+    contents["sample"] = b"not-a-valid-npz"
+    assets[3] = _asset(
+        "sample",
+        "SAMPLE_SUBMISSION",
+        "sample.npz",
+        contents["sample"],
+    )
+
+    async def fetch_dataset(_self, url):
+        return contents[url.rsplit("/", 1)[-1]]
+
+    async def close(_self):
+        return None
+
+    monkeypatch.setattr(RemoteURLProvider, "fetch_dataset", fetch_dataset)
+    monkeypatch.setattr(RemoteURLProvider, "close", close)
+
+    message = _message(assets)
+    message["prediction_format"] = "npz"
+    with pytest.raises(
+        ProblemProposalAssetValidationError,
+        match="not valid NPZ:",
+    ):
+        await ProblemProposalAssetValidator().validate_message(message)
+
+
+@pytest.mark.asyncio
+async def test_multi_array_npz_sample_is_accepted_during_preflight(monkeypatch):
+    contents, assets = _inventory()
     archive_buffer = io.BytesIO()
     np.savez(
         archive_buffer,
@@ -187,11 +216,10 @@ async def test_invalid_npz_sample_is_rejected_during_preflight(monkeypatch):
 
     message = _message(assets)
     message["prediction_format"] = "npz"
-    with pytest.raises(
-        ProblemProposalAssetValidationError,
-        match="not valid NPZ: .*exactly one array",
-    ):
-        await ProblemProposalAssetValidator().validate_message(message)
+    checks = await ProblemProposalAssetValidator().validate_message(message)
+
+    assert len(checks) == 5
+    assert all(check["passed"] for check in checks)
 
 
 @pytest.mark.asyncio

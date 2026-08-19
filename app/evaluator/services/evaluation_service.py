@@ -350,6 +350,14 @@ class EvaluationService:
                     validation_stderr = self._validate_subtask_predictions(
                         parsed_predictions, ground_truth, request_id, correlation_id
                     )
+                elif (
+                    custom_evaluator is not None
+                    and self._uses_numpy_tensor_format(request)
+                ):
+                    logger.info(
+                        "Skipping record validation for numpy tensor submission",
+                        extra={"request_id": request_id},
+                    )
                 else:
                     # For regular evaluation, validate total count
                     validation_stderr = self._validate_predictions_count(
@@ -1532,6 +1540,15 @@ class EvaluationService:
                 ).model_dump(),
             )
 
+    def _uses_numpy_tensor_format(self, request: EvaluationRequest) -> bool:
+        """Return True when predictions or ground truth use NumPy tensor formats."""
+        import os
+        from urllib.parse import urlparse
+
+        dataset_ext = os.path.splitext(urlparse(request.dataset_path).path)[1].lower()
+        prediction_format = (request.prediction_format or "").lower()
+        return prediction_format in ("npy", "npz") or dataset_ext in (".npy", ".npz")
+
     def _detect_ground_truth_type(self, dataset_path: str) -> SubmissionType:
         """
         Detect if ground truth is CSV or ZIP based on file extension.
@@ -1969,12 +1986,13 @@ class EvaluationService:
                 ".json": "json",
                 ".csv": "csv",
                 ".npy": "npy",
+                ".npz": "npz",
             }.get(dataset_ext, "csv")
 
             with log_performance(
                 logger, "ground_truth_parsing", format=ground_truth_format
             ):
-                if ground_truth_format == "npy":
+                if ground_truth_format in ("npy", "npz"):
                     result = self._parse_binary_predictions(
                         (
                             dataset_content

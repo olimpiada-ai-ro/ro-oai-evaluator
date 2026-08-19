@@ -344,7 +344,7 @@ class PredictionParser:
             raise PredictionParsingError(f"Failed to parse npy format: {str(e)}")
 
     def parse_npz(self, data: str | bytes) -> List[Any]:
-        """Parse a NumPy .npz archive containing exactly one prediction array."""
+        """Parse a NumPy .npz archive containing one or more named arrays."""
         import numpy as np
 
         try:
@@ -354,19 +354,37 @@ class PredictionParser:
                 if not isinstance(archive, np.lib.npyio.NpzFile):
                     raise PredictionParsingError("NPZ payload is not a NumPy archive")
 
-                array_names = archive.files
-                if len(array_names) != 1:
-                    raise PredictionParsingError(
-                        "NPZ archive must contain exactly one array; "
-                        f"found {len(array_names)}"
-                    )
-
-                array = archive[array_names[0]]
-                return self._numpy_array_to_predictions(array, "npz")
+                return self._npz_archive_to_predictions(archive, "npz")
         except PredictionParsingError:
             raise
         except Exception as e:
             raise PredictionParsingError(f"Failed to parse npz format: {str(e)}")
+
+    def _npz_archive_to_predictions(self, archive, format_type: str) -> List[Any]:
+        """Convert NPZ archive contents into the prediction-list contract."""
+        array_names = archive.files
+        if len(array_names) == 0:
+            raise PredictionParsingError(
+                f"{format_type.upper()} archive must contain at least one array"
+            )
+
+        if len(array_names) == 1:
+            return self._numpy_array_to_predictions(archive[array_names[0]], format_type)
+
+        record: Dict[str, Any] = {}
+        for name in array_names:
+            array = archive[name]
+            if array.dtype.hasobject:
+                raise PredictionParsingError(
+                    f"{format_type.upper()} object arrays are not supported"
+                )
+            if array.size == 0:
+                raise PredictionParsingError(
+                    f"{format_type.upper()} array '{name}' is empty"
+                )
+            record[name] = array.tolist()
+
+        return [record]
 
     @staticmethod
     def _validate_npz_metadata(data: bytes) -> None:
@@ -379,44 +397,52 @@ class PredictionParser:
         except (zipfile.BadZipFile, OSError) as exc:
             raise PredictionParsingError(f"Invalid NPZ archive: {exc}") from exc
 
-        if len(members) != 1:
+        if len(members) == 0:
             raise PredictionParsingError(
-                "NPZ archive must contain exactly one array as a non-directory "
-                f".npy member; found {len(members)}"
-            )
-
-        member = members[0]
-        if PurePosixPath(member.filename).suffix.lower() != ".npy":
-            raise PredictionParsingError(
-                "NPZ archive must contain exactly one array as a non-directory "
+                "NPZ archive must contain at least one array as a non-directory "
                 ".npy member"
             )
-        if member.flag_bits & 0x1:
-            raise PredictionParsingError("Encrypted NPZ members are not supported")
+        if len(members) > settings.ZIP_MAX_FILES:
+            raise PredictionParsingError(
+                "NPZ archive contains too many arrays "
+                f"({len(members)}); maximum is {settings.ZIP_MAX_FILES}"
+            )
 
         max_single_bytes = settings.ZIP_MAX_SINGLE_FILE_MB * 1024 * 1024
         max_total_bytes = settings.ZIP_MAX_EXTRACTED_SIZE_MB * 1024 * 1024
-        if member.file_size > max_single_bytes:
-            raise PredictionParsingError(
-                "NPZ array uncompressed size exceeds the configured "
-                f"{settings.ZIP_MAX_SINGLE_FILE_MB}MB single-file limit"
-            )
-        if member.file_size > max_total_bytes:
-            raise PredictionParsingError(
-                "NPZ array uncompressed size exceeds the configured "
-                f"{settings.ZIP_MAX_EXTRACTED_SIZE_MB}MB total archive limit"
-            )
-        if member.file_size > 0:
-            if member.compress_size <= 0:
+        total_uncompressed = 0
+
+        for member in members:
+            if PurePosixPath(member.filename).suffix.lower() != ".npy":
                 raise PredictionParsingError(
-                    "NPZ array has suspicious compression metadata"
+                    "NPZ archive members must be non-directory .npy arrays"
                 )
-            compression_ratio = member.file_size / member.compress_size
-            if compression_ratio > settings.ZIP_MAX_COMPRESSION_RATIO:
+            if member.flag_bits & 0x1:
+                raise PredictionParsingError("Encrypted NPZ members are not supported")
+
+            total_uncompressed += member.file_size
+            if member.file_size > max_single_bytes:
                 raise PredictionParsingError(
-                    "NPZ array compression ratio exceeds the configured "
-                    f"{settings.ZIP_MAX_COMPRESSION_RATIO}:1 safety limit"
+                    "NPZ array uncompressed size exceeds the configured "
+                    f"{settings.ZIP_MAX_SINGLE_FILE_MB}MB single-file limit"
                 )
+            if member.file_size > 0:
+                if member.compress_size <= 0:
+                    raise PredictionParsingError(
+                        "NPZ array has suspicious compression metadata"
+                    )
+                compression_ratio = member.file_size / member.compress_size
+                if compression_ratio > settings.ZIP_MAX_COMPRESSION_RATIO:
+                    raise PredictionParsingError(
+                        "NPZ array compression ratio exceeds the configured "
+                        f"{settings.ZIP_MAX_COMPRESSION_RATIO}:1 safety limit"
+                    )
+
+        if total_uncompressed > max_total_bytes:
+            raise PredictionParsingError(
+                "NPZ archive total uncompressed size exceeds the configured "
+                f"{settings.ZIP_MAX_EXTRACTED_SIZE_MB}MB limit"
+            )
 
     def parse_and_validate(self, data: str, format_type: str) -> StandardizedPrediction:
         """

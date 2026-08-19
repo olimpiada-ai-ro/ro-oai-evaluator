@@ -69,26 +69,32 @@ def test_numpy_formats_parse_to_prediction_lists(format_type, payload):
     assert PredictionParser().parse(payload, format_type) == [1, 2, 3]
 
 
-def test_npz_requires_exactly_one_array():
+def test_npz_rejects_empty_archive():
     parser = PredictionParser()
 
     with pytest.raises(
         PredictionParsingError,
-        match="exactly one array.*found 0",
+        match="at least one array",
     ):
         parser.parse(_npz_bytes(), "npz")
 
-    with pytest.raises(
-        PredictionParsingError,
-        match="exactly one array.*found 2",
-    ):
-        parser.parse(
-            _npz_bytes(
-                first=np.array([1, 2]),
-                second=np.array([3, 4]),
-            ),
-            "npz",
-        )
+
+def test_npz_parses_multiple_named_arrays():
+    parser = PredictionParser()
+    result = parser.parse(
+        _npz_bytes(
+            target=np.array([1, 2, 3]),
+            case_id=np.array([10, 20, 30]),
+        ),
+        "npz",
+    )
+
+    assert result == [
+        {
+            "target": [1, 2, 3],
+            "case_id": [10, 20, 30],
+        }
+    ]
 
 
 def test_npz_rejects_excessive_compression_ratio(monkeypatch):
@@ -166,3 +172,40 @@ def test_evaluation_service_parses_numpy_binary_formats(format_type, payload):
 
     assert not isinstance(result, JSONResponse)
     assert result == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_parse_ground_truth_npz_with_multiple_arrays():
+    service = EvaluationService()
+    request = EvaluationRequest(
+        datasource_provider="remote_url",
+        dataset_path="https://example.com/ground-truth.npz",
+        predictions_path="https://example.com/predictions.npz",
+        prediction_format="npz",
+    )
+    payload = _npz_bytes(
+        target=np.array([1, 2, 3]),
+        case_id=np.array([10, 20, 30]),
+    )
+
+    parsed = await service._parse_ground_truth(
+        payload,
+        request,
+        request_id="request-id",
+        correlation_id="correlation-id",
+    )
+
+    assert not isinstance(parsed, JSONResponse)
+    assert parsed == [{"target": [1, 2, 3], "case_id": [10, 20, 30]}]
+
+
+def test_uses_numpy_tensor_format_detects_npz_paths():
+    service = EvaluationService()
+    request = EvaluationRequest(
+        datasource_provider="remote_url",
+        dataset_path="https://example.com/ground-truth.npz",
+        predictions_path="https://example.com/predictions.csv",
+        prediction_format="csv",
+    )
+
+    assert service._uses_numpy_tensor_format(request) is True
